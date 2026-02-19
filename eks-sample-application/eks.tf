@@ -27,6 +27,12 @@ data "aws_security_group" "web_sg" {
     values = ["Web"]
   }
 }
+
+data "aws_acm_certificate" "issued" {
+  domain   = "*.example.ca"
+  statuses = ["ISSUED"]
+}
+
 resource "aws_eks_cluster" "this" {
   name     = var.cluster_name
   role_arn = aws_iam_role.eks_cluster.arn
@@ -34,7 +40,7 @@ resource "aws_eks_cluster" "this" {
   version = "1.29"
   vpc_config {
     subnet_ids              = data.aws_subnets.app_subnet.ids
-    endpoint_public_access  = true 
+    endpoint_public_access  = true
     endpoint_private_access = true
   }
 
@@ -48,9 +54,9 @@ resource "aws_eks_cluster" "this" {
 }
 
 # Managed Node Group (creates the EC2 workers for you)
-resource "aws_eks_node_group" "default" {
+resource "aws_eks_node_group" "cn_poc" {
   cluster_name    = aws_eks_cluster.this.name
-  node_group_name = "default"
+  node_group_name = "cn-poc"
   node_role_arn   = aws_iam_role.eks_node.arn
   subnet_ids      = data.aws_subnets.app_subnet.ids
 
@@ -63,9 +69,9 @@ resource "aws_eks_node_group" "default" {
   instance_types = ["t3.small"]
   ami_type       = "AL2_x86_64"
 
-  tags = var.tags
 
   depends_on = [
+    aws_eks_addon.vpc_cni,
     aws_iam_role_policy_attachment.node_worker_policy,
     aws_iam_role_policy_attachment.node_cni_policy,
     aws_iam_role_policy_attachment.node_ecr_ro
@@ -149,7 +155,7 @@ resource "helm_release" "lbc" {
 
   depends_on = [
     aws_eks_pod_identity_association.lbc,
-    aws_eks_node_group.default
+    aws_eks_node_group.cn_poc
   ]
 }
 
@@ -161,21 +167,6 @@ data "aws_eks_cluster_auth" "this" {
   name = aws_eks_cluster.this.name
 }
 
-
-provider "kubernetes" {
-  host                   = data.aws_eks_cluster.this.endpoint
-  cluster_ca_certificate = base64decode(data.aws_eks_cluster.this.certificate_authority[0].data)
-  token                  = data.aws_eks_cluster_auth.this.token
-}
-
-provider "helm" {
-  kubernetes = {
-    host                   = data.aws_eks_cluster.this.endpoint
-    cluster_ca_certificate = base64decode(data.aws_eks_cluster.this.certificate_authority[0].data)
-    token                  = data.aws_eks_cluster_auth.this.token
-    load_config_file       = false
-  }
-}
 
 
 # Namespace for the sample app
@@ -201,7 +192,7 @@ resource "kubernetes_deployment_v1" "echo" {
           name  = "echo"
           image = "hashicorp/http-echo:0.2.3"
           args  = ["-text=hello-from-eks"]
-          port { container_port = 5678 } 
+          port { container_port = 5678 }
         }
       }
     }
@@ -220,9 +211,9 @@ resource "kubernetes_service_v1" "echo" {
     port {
       name        = "http"
       port        = 80
-      target_port = 5678 
+      target_port = 5678
     }
-    type = "ClusterIP" 
+    type = "ClusterIP"
   }
 }
 
@@ -238,7 +229,7 @@ resource "kubernetes_ingress_v1" "echo_internal_alb" {
       "alb.ingress.kubernetes.io/subnets"                             = join(",", data.aws_subnets.web_subent.ids)
       "alb.ingress.kubernetes.io/security-groups"                     = data.aws_security_group.web_sg.id
       "alb.ingress.kubernetes.io/target-type"                         = "ip"
-      "alb.ingress.kubernetes.io/certificate-arn"                     = "arn:aws:acm:ca-central-1:627754053854:certificate/a817283a-36aa-4183-b495-194c4fd2f0f1"
+      "alb.ingress.kubernetes.io/certificate-arn"                     = "${data.aws_acm_certificate.issued.arn}"
       "alb.ingress.kubernetes.io/listen-ports"                        = "[{\"HTTPS\":443}]"
       "alb.ingress.kubernetes.io/manage-backend-security-group-rules" = "true"
       "alb.ingress.kubernetes.io/load-balancer-name"                  = "eks-sample-app-alb"
